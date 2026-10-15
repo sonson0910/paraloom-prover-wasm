@@ -35,10 +35,20 @@ fn fr_to_le_bytes_32(fr: Fr) -> [u8; 32] {
     o
 }
 
+#[cfg(target_arch = "wasm32")]
+fn js_err(msg: &str) -> JsValue {
+    JsValue::from_str(msg)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn js_err(_msg: &str) -> JsValue {
+    JsValue::NULL
+}
+
 fn hex32(s: &str) -> Result<[u8; 32], JsValue> {
-    let b = hex::decode(s.trim()).map_err(|e| JsValue::from_str(&format!("bad hex: {e}")))?;
+    let b = hex::decode(s.trim()).map_err(|e| js_err(&format!("bad hex: {e}")))?;
     if b.len() != 32 {
-        return Err(JsValue::from_str("expected 32-byte hex"));
+        return Err(js_err("expected 32-byte hex"));
     }
     let mut o = [0u8; 32];
     o.copy_from_slice(&b);
@@ -493,7 +503,7 @@ pub fn prove_transact(
     outputs_json: &str,
 ) -> Result<String, JsValue> {
     if ext_amount > 0 {
-        return Err(JsValue::from_str(
+        return Err(js_err(
             "positive ext_amount: deposits go through deposit_note, not transact",
         ));
     }
@@ -501,16 +511,25 @@ pub fn prove_transact(
     let recipient = hex32(recipient_hex)?;
 
     let inputs: Vec<TransactInputNote> = serde_json::from_str(inputs_json)
-        .map_err(|e| JsValue::from_str(&format!("bad inputs json: {e}")))?;
+        .map_err(|e| js_err(&format!("bad inputs json: {e}")))?;
     let outputs: Vec<TransactOutputNote> = serde_json::from_str(outputs_json)
-        .map_err(|e| JsValue::from_str(&format!("bad outputs json: {e}")))?;
+        .map_err(|e| js_err(&format!("bad outputs json: {e}")))?;
     if inputs.len() != 2 || outputs.len() != 2 {
-        return Err(JsValue::from_str("transact is fixed 2-in/2-out"));
+        return Err(js_err("transact is fixed 2-in/2-out"));
     }
 
     // The shielded asset: all-zero for native SOL, or `mint_to_asset(mint)` for
     // a shielded SPL note (#779). All notes in one transact share one asset.
     let asset = Fr::from_le_bytes_mod_order(&hex32(asset_id_hex)?);
+    let root_fr = Fr::from_le_bytes_mod_order(&root);
+
+    let in_sum: i128 = i128::from(inputs[0].amount) + i128::from(inputs[1].amount);
+    let out_sum: i128 = i128::from(outputs[0].amount) + i128::from(outputs[1].amount);
+    if in_sum + i128::from(ext_amount) != out_sum {
+        return Err(js_err(
+            "value conservation violated: sum(inputs) + ext_amount != sum(outputs)",
+        ));
+    }
 
     let mut in_amounts = Vec::new();
     let mut in_privkeys = Vec::new();
@@ -519,10 +538,16 @@ pub fn prove_transact(
     let mut in_paths = Vec::new();
     let mut nullifiers = Vec::new();
     for inp in &inputs {
+        if inp.leaf_index > u32::MAX as u64 {
+            return Err(js_err(&format!(
+                "input leaf_index {} exceeds 32-bit circuit tree depth",
+                inp.leaf_index
+            )));
+        }
         let privkey = hex32(&inp.privkey_hex)?;
         let blinding = hex32(&inp.blinding_hex)?;
         if inp.path_hex.len() != TX_LEVELS {
-            return Err(JsValue::from_str(&format!(
+            return Err(js_err(&format!(
                 "input path must have {TX_LEVELS} siblings, got {}",
                 inp.path_hex.len()
             )));
@@ -539,6 +564,24 @@ pub fn prove_transact(
             Fr::from_le_bytes_mod_order(&blinding),
             asset,
         );
+        if inp.amount > 0 {
+            let mut cur = c;
+            let mut idx = inp.leaf_index;
+            for sib in &path {
+                let sib_fr = Fr::from_le_bytes_mod_order(sib);
+                cur = if idx & 1 == 0 {
+                    v3_merkle_pair(cur, sib_fr)
+                } else {
+                    v3_merkle_pair(sib_fr, cur)
+                };
+                idx >>= 1;
+            }
+            if cur != root_fr {
+                return Err(js_err(
+                    "input Merkle path does not resolve to the supplied root",
+                ));
+            }
+        }
         let sig = v3_signature(sk, c, Fr::from(inp.leaf_index));
         let nf = v3_nullifier(c, Fr::from(inp.leaf_index), sig);
         nullifiers.push(fr_to_le_bytes_32(nf));

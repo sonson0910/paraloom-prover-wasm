@@ -106,11 +106,13 @@ fn prove_transact_roundtrips_against_the_persistent_keys() {
     );
 
     let recipient = [3u8; 32];
+    let native_asset = [0u8; 32];
     let out = prove_transact(
         &pk_bytes,
         &hx(&fr_to_le(&root)),
         -500,
         &hx(&recipient),
+        &hx(&native_asset),
         &inputs,
         &outputs,
     )
@@ -246,6 +248,7 @@ fn v3_merkle_path_output_proves_membership() {
         &root_hex,
         -500,
         &hx(&[3u8; 32]),
+        &hx(&[0u8; 32]),
         &inputs,
         &outputs,
     );
@@ -255,3 +258,63 @@ fn v3_merkle_path_output_proves_membership() {
         res.err()
     );
 }
+
+#[test]
+fn prove_transact_rejects_leaf_index_overflow_unbalanced_amounts_and_wrong_root() {
+    let z = hx(&[0u8; 32]);
+    let path_json = serde_json::to_string(&vec![z.clone(); 32]).unwrap();
+    let opk = v3_note_pubkey(&hx(&fr_to_le(&Fr::from(61u64)))).unwrap();
+
+    // 1. leaf_index > u32::MAX must be rejected before circuit synthesis
+    // truncates it via `as u32`.
+    let overflow_inputs = format!(
+        r#"[
+          {{"amount":0,"privkey_hex":"{z}","blinding_hex":"{z}","leaf_index":{},"path_hex":{path_json}}},
+          {{"amount":0,"privkey_hex":"{z}","blinding_hex":"{z}","leaf_index":0,"path_hex":{path_json}}}
+        ]"#,
+        (u32::MAX as u64) + 1
+    );
+    let zero_outputs = format!(
+        r#"[
+          {{"amount":0,"pubkey_hex":"{opk}","blinding_hex":"{z}"}},
+          {{"amount":0,"pubkey_hex":"{opk}","blinding_hex":"{z}"}}
+        ]"#
+    );
+    assert!(
+        prove_transact(&[], &z, 0, &z, &z, &overflow_inputs, &zero_outputs).is_err(),
+        "leaf_index > u32::MAX must be rejected"
+    );
+
+    // 2. Unbalanced amounts (sum(inputs) + ext_amount != sum(outputs)) must be
+    // rejected before Groth16 proving.
+    let valid_idx_inputs = format!(
+        r#"[
+          {{"amount":1000,"privkey_hex":"{z}","blinding_hex":"{z}","leaf_index":0,"path_hex":{path_json}}},
+          {{"amount":0,"privkey_hex":"{z}","blinding_hex":"{z}","leaf_index":0,"path_hex":{path_json}}}
+        ]"#
+    );
+    let unbalanced_outputs = format!(
+        r#"[
+          {{"amount":600,"pubkey_hex":"{opk}","blinding_hex":"{z}"}},
+          {{"amount":100,"pubkey_hex":"{opk}","blinding_hex":"{z}"}}
+        ]"#
+    );
+    assert!(
+        prove_transact(&[], &z, -500, &z, &z, &valid_idx_inputs, &unbalanced_outputs).is_err(),
+        "unbalanced value conservation must be rejected"
+    );
+
+    // 3. Non-zero input whose Merkle path does not fold to `root` must be
+    // rejected before Groth16 proving.
+    let balanced_outputs = format!(
+        r#"[
+          {{"amount":400,"pubkey_hex":"{opk}","blinding_hex":"{z}"}},
+          {{"amount":100,"pubkey_hex":"{opk}","blinding_hex":"{z}"}}
+        ]"#
+    );
+    assert!(
+        prove_transact(&[], &z, -500, &z, &z, &valid_idx_inputs, &balanced_outputs).is_err(),
+        "mismatched Merkle root for non-zero input must be rejected"
+    );
+}
+
