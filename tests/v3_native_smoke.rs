@@ -316,5 +316,60 @@ fn prove_transact_rejects_leaf_index_overflow_unbalanced_amounts_and_wrong_root(
         prove_transact(&[], &z, -500, &z, &z, &valid_idx_inputs, &balanced_outputs).is_err(),
         "mismatched Merkle root for non-zero input must be rejected"
     );
+
+    // 4. Duplicate input nullifiers (e.g. two zero-value dummy inputs with
+    // identical privkey/blinding/leaf_index) must be rejected before circuit
+    // synthesis.
+    let dup_nullifier_inputs = format!(
+        r#"[
+          {{"amount":0,"privkey_hex":"{z}","blinding_hex":"{z}","leaf_index":0,"path_hex":{path_json}}},
+          {{"amount":0,"privkey_hex":"{z}","blinding_hex":"{z}","leaf_index":0,"path_hex":{path_json}}}
+        ]"#
+    );
+    assert!(
+        prove_transact(&[], &z, 0, &z, &z, &dup_nullifier_inputs, &zero_outputs).is_err(),
+        "duplicate input nullifiers must be rejected"
+    );
+
+    // 5. Non-canonical BN254 field elements (>= scalar modulus p, such as
+    // [0xFF; 32]) must be rejected across v3 helpers and prove_transact rather
+    // than silently reduced mod p into unspendable commitments.
+    let non_canonical = hx(&[0xFFu8; 32]);
+    assert!(
+        v3_note_pubkey(&non_canonical).is_err(),
+        "v3_note_pubkey must reject non-canonical privkey"
+    );
+    assert!(
+        v3_note_commitment(100, &opk, &non_canonical).is_err(),
+        "v3_note_commitment must reject non-canonical blinding"
+    );
+    let non_canonical_outputs = format!(
+        r#"[
+          {{"amount":0,"pubkey_hex":"{opk}","blinding_hex":"{non_canonical}"}},
+          {{"amount":0,"pubkey_hex":"{opk}","blinding_hex":"{z}"}}
+        ]"#
+    );
+    let distinct_zero_inputs = format!(
+        r#"[
+          {{"amount":0,"privkey_hex":"{}","blinding_hex":"{z}","leaf_index":0,"path_hex":{path_json}}},
+          {{"amount":0,"privkey_hex":"{}","blinding_hex":"{z}","leaf_index":0,"path_hex":{path_json}}}
+        ]"#,
+        hx(&fr_to_le(&Fr::from(1u64))),
+        hx(&fr_to_le(&Fr::from(2u64))),
+    );
+    assert!(
+        prove_transact(
+            &[],
+            &z,
+            0,
+            &z,
+            &z,
+            &distinct_zero_inputs,
+            &non_canonical_outputs
+        )
+        .is_err(),
+        "prove_transact must reject non-canonical output blinding"
+    );
 }
+
 

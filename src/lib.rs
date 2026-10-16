@@ -55,6 +55,17 @@ fn hex32(s: &str) -> Result<[u8; 32], JsValue> {
     Ok(o)
 }
 
+fn hex32_canonical(s: &str) -> Result<[u8; 32], JsValue> {
+    let b = hex32(s)?;
+    let reduced = Fr::from_le_bytes_mod_order(&b);
+    if fr_to_le_bytes_32(reduced) != b {
+        return Err(js_err(
+            "non-canonical BN254 field element (>= scalar field modulus)",
+        ));
+    }
+    Ok(b)
+}
+
 /// Poseidon commitment for a note `(amount, randomness, recipient)`, hex. The
 /// wallet needs this to look up the note's Merkle path from the path server.
 #[wasm_bindgen]
@@ -128,7 +139,7 @@ fn merkle_path_from(
     indices: &[bool],
 ) -> Result<Vec<([u8; 32], bool)>, JsValue> {
     if path_hex.len() != indices.len() {
-        return Err(JsValue::from_str("path and indices length mismatch"));
+        return Err(js_err("path and indices length mismatch"));
     }
     let mut path = Vec::with_capacity(path_hex.len());
     for (h, dir) in path_hex.iter().zip(indices) {
@@ -190,9 +201,9 @@ pub fn prove_withdrawal_v2(
     let dest_recipient = hex32(dest_recipient_hex)?;
 
     let path_hex: Vec<String> = serde_json::from_str(path_hex_json)
-        .map_err(|e| JsValue::from_str(&format!("bad path json: {e}")))?;
+        .map_err(|e| js_err(&format!("bad path json: {e}")))?;
     let indices: Vec<bool> = serde_json::from_str(indices_json)
-        .map_err(|e| JsValue::from_str(&format!("bad indices json: {e}")))?;
+        .map_err(|e| js_err(&format!("bad indices json: {e}")))?;
     let merkle_path = merkle_path_from(&path_hex, &indices)?;
 
     let leaf_index = leaf_index_from(&indices);
@@ -228,15 +239,15 @@ pub fn prove_withdrawal_v2(
     };
 
     let pk = ProvingKey::<Bn254>::deserialize_compressed(proving_key)
-        .map_err(|e| JsValue::from_str(&format!("bad proving key: {e}")))?;
+        .map_err(|e| js_err(&format!("bad proving key: {e}")))?;
     let proof =
         Groth16ProofSystem::prove::<WithdrawCircuitV2, _>(&pk, circuit, &mut rng_from_entropy())
-            .map_err(|e| JsValue::from_str(&format!("prove failed: {e}")))?;
+            .map_err(|e| js_err(&format!("prove failed: {e}")))?;
 
     let mut proof_bytes = Vec::new();
     proof
         .serialize_compressed(&mut proof_bytes)
-        .map_err(|e| JsValue::from_str(&format!("serialize failed: {e}")))?;
+        .map_err(|e| js_err(&format!("serialize failed: {e}")))?;
 
     Ok(format!(
         "{{\"nullifier\":\"{}\",\"proof\":\"{}\"}}",
@@ -301,11 +312,11 @@ pub fn prove_transfer_v2(
     let asset_fr = Fr::from_le_bytes_mod_order(&asset_id);
 
     let inputs: Vec<TransferInputV2> = serde_json::from_str(inputs_json)
-        .map_err(|e| JsValue::from_str(&format!("bad inputs json: {e}")))?;
+        .map_err(|e| js_err(&format!("bad inputs json: {e}")))?;
     let outputs: Vec<TransferOutputV2> = serde_json::from_str(outputs_json)
-        .map_err(|e| JsValue::from_str(&format!("bad outputs json: {e}")))?;
+        .map_err(|e| js_err(&format!("bad outputs json: {e}")))?;
     if inputs.len() != 2 || outputs.len() != 2 {
-        return Err(JsValue::from_str(
+        return Err(js_err(
             "transfer requires exactly 2 inputs and 2 outputs",
         ));
     }
@@ -369,15 +380,15 @@ pub fn prove_transfer_v2(
     );
 
     let pk = ProvingKey::<Bn254>::deserialize_compressed(proving_key)
-        .map_err(|e| JsValue::from_str(&format!("bad proving key: {e}")))?;
+        .map_err(|e| js_err(&format!("bad proving key: {e}")))?;
     let proof =
         Groth16ProofSystem::prove::<TransferCircuitV2, _>(&pk, circuit, &mut rng_from_entropy())
-            .map_err(|e| JsValue::from_str(&format!("prove failed: {e}")))?;
+            .map_err(|e| js_err(&format!("prove failed: {e}")))?;
 
     let mut proof_bytes = Vec::new();
     proof
         .serialize_compressed(&mut proof_bytes)
-        .map_err(|e| JsValue::from_str(&format!("serialize failed: {e}")))?;
+        .map_err(|e| js_err(&format!("serialize failed: {e}")))?;
 
     let nulls: Vec<String> = nullifiers.iter().map(hex::encode).collect();
     let commits: Vec<String> = output_commitments.iter().map(hex::encode).collect();
@@ -414,7 +425,7 @@ pub fn mint_to_asset(mint_hex: &str) -> Result<String, JsValue> {
 /// Derive the v3 spend public key `Poseidon1(privkey)` (circom Poseidon).
 #[wasm_bindgen]
 pub fn v3_note_pubkey(privkey_hex: &str) -> Result<String, JsValue> {
-    let sk = Fr::from_le_bytes_mod_order(&hex32(privkey_hex)?);
+    let sk = Fr::from_le_bytes_mod_order(&hex32_canonical(privkey_hex)?);
     Ok(hex::encode(fr_to_le_bytes_32(v3_pubkey(sk))))
 }
 
@@ -428,8 +439,8 @@ pub fn v3_note_commitment(
 ) -> Result<String, JsValue> {
     let c = v3_commit(
         Fr::from(amount),
-        Fr::from_le_bytes_mod_order(&hex32(pubkey_hex)?),
-        Fr::from_le_bytes_mod_order(&hex32(blinding_hex)?),
+        Fr::from_le_bytes_mod_order(&hex32_canonical(pubkey_hex)?),
+        Fr::from_le_bytes_mod_order(&hex32_canonical(blinding_hex)?),
         Fr::from(0u64), // NATIVE_SOL
     );
     Ok(hex::encode(fr_to_le_bytes_32(c)))
@@ -448,9 +459,9 @@ pub fn v3_note_commitment_asset(
 ) -> Result<String, JsValue> {
     let c = v3_commit(
         Fr::from(amount),
-        Fr::from_le_bytes_mod_order(&hex32(pubkey_hex)?),
-        Fr::from_le_bytes_mod_order(&hex32(blinding_hex)?),
-        Fr::from_le_bytes_mod_order(&hex32(asset_id_hex)?),
+        Fr::from_le_bytes_mod_order(&hex32_canonical(pubkey_hex)?),
+        Fr::from_le_bytes_mod_order(&hex32_canonical(blinding_hex)?),
+        Fr::from_le_bytes_mod_order(&hex32_canonical(asset_id_hex)?),
     );
     Ok(hex::encode(fr_to_le_bytes_32(c)))
 }
@@ -507,7 +518,7 @@ pub fn prove_transact(
             "positive ext_amount: deposits go through deposit_note, not transact",
         ));
     }
-    let root = hex32(root_hex)?;
+    let root = hex32_canonical(root_hex)?;
     let recipient = hex32(recipient_hex)?;
 
     let inputs: Vec<TransactInputNote> = serde_json::from_str(inputs_json)
@@ -520,7 +531,7 @@ pub fn prove_transact(
 
     // The shielded asset: all-zero for native SOL, or `mint_to_asset(mint)` for
     // a shielded SPL note (#779). All notes in one transact share one asset.
-    let asset = Fr::from_le_bytes_mod_order(&hex32(asset_id_hex)?);
+    let asset = Fr::from_le_bytes_mod_order(&hex32_canonical(asset_id_hex)?);
     let root_fr = Fr::from_le_bytes_mod_order(&root);
 
     let in_sum: i128 = i128::from(inputs[0].amount) + i128::from(inputs[1].amount);
@@ -544,8 +555,8 @@ pub fn prove_transact(
                 inp.leaf_index
             )));
         }
-        let privkey = hex32(&inp.privkey_hex)?;
-        let blinding = hex32(&inp.blinding_hex)?;
+        let privkey = hex32_canonical(&inp.privkey_hex)?;
+        let blinding = hex32_canonical(&inp.blinding_hex)?;
         if inp.path_hex.len() != TX_LEVELS {
             return Err(js_err(&format!(
                 "input path must have {TX_LEVELS} siblings, got {}",
@@ -554,7 +565,7 @@ pub fn prove_transact(
         }
         let mut path = Vec::with_capacity(TX_LEVELS);
         for sib in &inp.path_hex {
-            path.push(hex32(sib)?);
+            path.push(hex32_canonical(sib)?);
         }
 
         let sk = Fr::from_le_bytes_mod_order(&privkey);
@@ -593,13 +604,17 @@ pub fn prove_transact(
         in_paths.push(Some(path));
     }
 
+    if nullifiers[0] == nullifiers[1] {
+        return Err(js_err("duplicate input nullifier"));
+    }
+
     let mut out_amounts = Vec::new();
     let mut out_pubkeys = Vec::new();
     let mut out_blindings = Vec::new();
     let mut output_commitments = Vec::new();
     for outp in &outputs {
-        let pubkey = hex32(&outp.pubkey_hex)?;
-        let blinding = hex32(&outp.blinding_hex)?;
+        let pubkey = hex32_canonical(&outp.pubkey_hex)?;
+        let blinding = hex32_canonical(&outp.blinding_hex)?;
         let oc = v3_commit(
             Fr::from(outp.amount),
             Fr::from_le_bytes_mod_order(&pubkey),
@@ -646,15 +661,15 @@ pub fn prove_transact(
     };
 
     let pk = ProvingKey::<Bn254>::deserialize_compressed(proving_key)
-        .map_err(|e| JsValue::from_str(&format!("bad proving key: {e}")))?;
+        .map_err(|e| js_err(&format!("bad proving key: {e}")))?;
     let proof =
         Groth16ProofSystem::prove::<TransactCircuitV3, _>(&pk, circuit, &mut rng_from_entropy())
-            .map_err(|e| JsValue::from_str(&format!("prove failed: {e}")))?;
+            .map_err(|e| js_err(&format!("prove failed: {e}")))?;
 
     let mut proof_bytes = Vec::new();
     proof
         .serialize_compressed(&mut proof_bytes)
-        .map_err(|e| JsValue::from_str(&format!("serialize failed: {e}")))?;
+        .map_err(|e| js_err(&format!("serialize failed: {e}")))?;
 
     // The L2 carries `tag(1) || body`. Nodes split the envelope and reject an
     // unknown suite rather than assuming the one they happen to embed, so an
@@ -690,13 +705,13 @@ pub fn v3_merkle_path(leaves_json: &str, leaf_index: u32) -> Result<String, JsVa
     use privacy::poseidon_circom::v3_merkle_pair;
 
     let leaves_hex: Vec<String> = serde_json::from_str(leaves_json)
-        .map_err(|e| JsValue::from_str(&format!("bad leaves json: {e}")))?;
+        .map_err(|e| js_err(&format!("bad leaves json: {e}")))?;
     if (leaf_index as usize) >= leaves_hex.len() {
-        return Err(JsValue::from_str("leaf_index out of range"));
+        return Err(js_err("leaf_index out of range"));
     }
     let mut level: Vec<Fr> = Vec::with_capacity(leaves_hex.len());
     for l in &leaves_hex {
-        level.push(Fr::from_le_bytes_mod_order(&hex32(l)?));
+        level.push(Fr::from_le_bytes_mod_order(&hex32_canonical(l)?));
     }
 
     // Zero-subtree hashes, as the on-chain tree pads with.
