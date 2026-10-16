@@ -332,12 +332,17 @@ fn prove_transact_rejects_leaf_index_overflow_unbalanced_amounts_and_wrong_root(
     );
 
     // 5. Non-canonical BN254 field elements (>= scalar modulus p, such as
-    // [0xFF; 32]) must be rejected across v3 helpers and prove_transact rather
-    // than silently reduced mod p into unspendable commitments.
+    // [0xFF; 32]) must be rejected for pubkey, blinding, root, asset_id, and
+    // Merkle siblings across v3 helpers and prove_transact, while v3_note_pubkey
+    // accepts any 32-byte SHA-256 spend-key digest and produces a canonical pubkey.
     let non_canonical = hx(&[0xFFu8; 32]);
     assert!(
-        v3_note_pubkey(&non_canonical).is_err(),
-        "v3_note_pubkey must reject non-canonical privkey"
+        v3_note_pubkey(&non_canonical).is_ok(),
+        "v3_note_pubkey must accept 32-byte SHA-256 spend-key digest"
+    );
+    assert!(
+        v3_note_commitment(100, &non_canonical, &z).is_err(),
+        "v3_note_commitment must reject non-canonical pubkey"
     );
     assert!(
         v3_note_commitment(100, &opk, &non_canonical).is_err(),

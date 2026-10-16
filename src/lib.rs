@@ -423,9 +423,14 @@ pub fn mint_to_asset(mint_hex: &str) -> Result<String, JsValue> {
 }
 
 /// Derive the v3 spend public key `Poseidon1(privkey)` (circom Poseidon).
+///
+/// `privkey_hex` accepts any 32-byte hex digest (e.g. the wallet's
+/// `SHA-256("paraloom-spend-v2" || accountSeed)`) and reduces it mod the BN254
+/// scalar field order, matching `TransactCircuitV3`'s `bytes_to_fr` witness
+/// reduction. The returned `pubkey` is always a canonical field element.
 #[wasm_bindgen]
 pub fn v3_note_pubkey(privkey_hex: &str) -> Result<String, JsValue> {
-    let sk = Fr::from_le_bytes_mod_order(&hex32_canonical(privkey_hex)?);
+    let sk = Fr::from_le_bytes_mod_order(&hex32(privkey_hex)?);
     Ok(hex::encode(fr_to_le_bytes_32(v3_pubkey(sk))))
 }
 
@@ -555,7 +560,7 @@ pub fn prove_transact(
                 inp.leaf_index
             )));
         }
-        let privkey = hex32_canonical(&inp.privkey_hex)?;
+        let privkey = hex32(&inp.privkey_hex)?;
         let blinding = hex32_canonical(&inp.blinding_hex)?;
         if inp.path_hex.len() != TX_LEVELS {
             return Err(js_err(&format!(
